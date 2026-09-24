@@ -1,7 +1,6 @@
 package com.carlink
 
 import android.content.Context
-import android.hardware.usb.UsbManager
 import android.os.PowerManager
 import android.view.Surface
 import androidx.core.content.edit
@@ -49,7 +48,8 @@ import com.carlink.protocol.VideoStreamingSignal
 import com.carlink.ui.settings.AdapterConfigPreference
 import com.carlink.ui.settings.MicSourceConfig
 import com.carlink.ui.settings.WiFiBandConfig
-import com.carlink.usb.UsbDeviceWrapper
+import com.carlink.usb.RemoteUsbTransport
+import com.carlink.usb.UsbTransport
 import com.carlink.util.AppExecutors
 import com.carlink.util.LogCallback
 import com.carlink.video.H264Renderer
@@ -322,8 +322,7 @@ class CarlinkManager(
     private var callback: Callback? = null
 
     // USB
-    private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-    private var usbDevice: UsbDeviceWrapper? = null
+    private var usbDevice: UsbTransport? = null
 
     // Wake lock to prevent CPU sleep during USB streaming
     // PARTIAL_WAKE_LOCK keeps CPU running but allows screen to turn off
@@ -876,15 +875,16 @@ class CarlinkManager(
 
         // Find device
         log("Searching for Carlinkit device...")
-        val device = findDevice()
-        if (device == null) {
-            logError("Failed to find Carlinkit device", tag = Logger.Tags.USB)
+        val device = RemoteUsbTransport(context) { log(it) }
+        if (!device.connect()) {
+            val reason = device.failureDetail.ifBlank { "unknown helper connection failure" }
+            logError("USB helper unavailable: $reason", tag = Logger.Tags.USB)
             setState(State.DISCONNECTED)
-            setStatusText("Adapter not found")
+            setStatusText("USB helper unavailable: $reason")
             return
         }
 
-        log("Device found, opening")
+        log("USB helper connected")
         usbDevice = device
         setStatusText("Adapter found — opening...")
 
@@ -912,13 +912,6 @@ class CarlinkManager(
             },
             tag = Logger.Tags.VIDEO,
         )
-
-        if (!device.openWithPermission()) {
-            logError("Failed to open USB device", tag = Logger.Tags.USB)
-            setState(State.DISCONNECTED)
-            setStatusText("USB permission denied")
-            return
-        }
 
         // Clear any stale adapter session left by a prior force-kill or crash.
         // The adapter firmware retains session state across USB reconnects. If the previous
@@ -1714,26 +1707,6 @@ class CarlinkManager(
             wakeLock.release()
             logInfo("[WAKE_LOCK] Released wake lock", tag = Logger.Tags.USB)
         }
-    }
-
-    private suspend fun findDevice(): UsbDeviceWrapper? {
-        var device: UsbDeviceWrapper? = null
-        var attempts = 0
-
-        while (device == null && attempts < 10) {
-            device = UsbDeviceWrapper.findFirst(context, usbManager) { log(it) }
-
-            if (device == null) {
-                attempts++
-                delay(USB_WAIT_PERIOD_MS)
-            }
-        }
-
-        if (device != null) {
-            log("Carlinkit device found!")
-        }
-
-        return device
     }
 
     private fun handleMessage(message: Message) {
@@ -3052,8 +3025,8 @@ class CarlinkManager(
      * - offset 12: pts (4 bytes) - SOURCE PRESENTATION TIMESTAMP (milliseconds, logged only — codec uses elapsed-time PTS)
      * - offset 16: flags (4 bytes) - usually 0 (reserved)
      */
-    private fun createVideoProcessor(): UsbDeviceWrapper.VideoDataProcessor {
-        return object : UsbDeviceWrapper.VideoDataProcessor {
+    private fun createVideoProcessor(): UsbTransport.VideoDataProcessor {
+        return object : UsbTransport.VideoDataProcessor {
             override fun processVideoDirect(
                 data: ByteArray,
                 dataLength: Int,
