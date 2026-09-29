@@ -143,6 +143,10 @@ class CarlinkManager(
     companion object {
         private const val USB_WAIT_PERIOD_MS = 3000L
         private const val PAIR_TIMEOUT_MS = 15000L
+        // If the adapter remains in CONNECTING without ever emitting PLUGGED,
+        // its wireless/session state can be stale after AAOS sleep. Give the
+        // pairing retry time to work, then rebuild the session automatically.
+        private const val PHONE_HANDSHAKE_TIMEOUT_MS = 30000L
 
         // Auto-reconnect constants
         private const val MAX_RECONNECT_ATTEMPTS = 5
@@ -878,9 +882,18 @@ class CarlinkManager(
         val device = RemoteUsbTransport(context) { log(it) }
         if (!device.connect()) {
             val reason = device.failureDetail.ifBlank { "unknown helper connection failure" }
+            // connect() may have successfully bound the helper before its USB
+            // enumeration was ready. Always tear that transport down before a
+            // retry; otherwise the next attempt can inherit a stale Binder
+            // connection or a shut-down callback executor.
+            device.close()
             logError("USB helper unavailable: $reason", tag = Logger.Tags.USB)
             setState(State.DISCONNECTED)
             setStatusText("USB helper unavailable: $reason")
+            // A USB attach broadcast can arrive before UsbManager's device list
+            // and the GM fixed-handler permission grant settle. Retry through the
+            // normal backoff path instead of requiring the user to press Reset.
+            scheduleReconnect()
             return
         }
 
@@ -1027,6 +1040,33 @@ class CarlinkManager(
                         }
                     },
                     PAIR_TIMEOUT_MS,
+                )
+                schedule(
+                    object : TimerTask() {
+                        override fun run() {
+                            if (state == State.CONNECTING && currentPhoneType == null) {
+                                logWarn(
+                                    "[PAIR] No PLUGGED phone handshake after " +
+                                        "${PHONE_HANDSHAKE_TIMEOUT_MS}ms; restarting session",
+                                    tag = Logger.Tags.ADAPTR,
+                                )
+                                scope.launch {
+                                    try {
+                                        restart()
+                                    } catch (error: kotlinx.coroutines.CancellationException) {
+                                        throw error
+                                    } catch (error: Exception) {
+                                        logWarn(
+                                            "[PAIR] Automatic session restart failed: " +
+                                                (error.message ?: error.javaClass.simpleName),
+                                            tag = Logger.Tags.ADAPTR,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    PHONE_HANDSHAKE_TIMEOUT_MS,
                 )
             }
     }
@@ -1543,6 +1583,30 @@ class CarlinkManager(
                 scheduleDelayedKeyframe()
             }
         }
+    }
+
+    /**
+     * Rebuild the complete adapter session after a prolonged AAOS background period.
+     *
+     * A short activity transition only needs the codec flush in [pauseVideo]. After a
+     * long vehicle sleep, however, AAOS may suspend/recreate the USB, audio, or Surface
+     * pipelines while this process remains alive. In that state the old session can
+     * report as connected while delivering corrupted/stalled audio and video. Releasing
+     * the transport, audio tracks, codec state, and adapter protocol session together
+     * mirrors the recovery that users currently get by force-stopping and reopening the
+     * app, without requiring user intervention.
+     *
+     * The caller should run this from a background dispatcher because [start] contains
+     * deliberate protocol pacing delays.
+     */
+    suspend fun recoverAfterLongBackground(backgroundDurationMs: Long) {
+        logWarn(
+            "[LIFECYCLE] Recovering full adapter session after " +
+                "${backgroundDurationMs}ms in background",
+            tag = Logger.Tags.ADAPTR,
+        )
+        stop()
+        start()
     }
 
     /**

@@ -102,8 +102,17 @@ class UsbBridgeService : Service() {
 
     private fun openDevice(requested: UsbDevice? = null): Boolean {
         if (running.get()) return true
-        val devices = usbManager.deviceList.values.toList()
-        val device = requested ?: devices.firstOrNull(::isKnownDevice)
+        // USB_DEVICE_ATTACHED and the UsbManager device list are not updated
+        // atomically on all GM builds. Give enumeration and the fixed-handler
+        // permission grant a short window to settle before failing.
+        var devices = usbManager.deviceList.values.toList()
+        var device = requested ?: devices.firstOrNull(::isKnownDevice)
+        for (attempt in 0 until 5) {
+            if (device != null) break
+            Thread.sleep(200)
+            devices = usbManager.deviceList.values.toList()
+            device = requested ?: devices.firstOrNull(::isKnownDevice)
+        }
         if (device == null || !isKnownDevice(device)) {
             emitState(
                 UsbBridgeConstants.STATE_ERROR,

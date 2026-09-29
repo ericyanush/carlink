@@ -25,24 +25,25 @@ interfaces used by the Play app to bind to the helper and exchange complete
 CPC200 messages in chunks. The helper owns all `UsbManager` calls; the Play app
 does not request USB permission or open the adapter directly.
 
-## Required helper components
+## Required helper component
 
-The helper manifest intentionally exposes:
+The helper manifest exposes only the exported bridge service:
 
-- `android.car.usb.handler.UsbHostManagementActivity`
 - `com.carlink.usbhelper.UsbBridgeService`
 
-The activity name is exact because GM's fixed handler references that component.
-The USB attach intent also includes the CPC200 device filter for:
-
-- VID `0x1314`, PID `0x1520`
-- VID `0x1314`, PID `0x1521`
-- VID `0x08e4`, PID `0x01c0`
+The helper intentionally does **not** declare
+`android.car.usb.handler.UsbHostManagementActivity`. GM's fixed handler runs
+for every host-mode USB attach, grants permission to the package named
+`android.car.usb.handler`, then attempts to launch its configured activity. On
+this firmware, a missing activity is caught by the system after the grant is
+issued. Omitting the activity therefore preserves the silent permission grant
+without putting a sideloaded helper activity on screen. This matters when a
+phone or another USB device is connected while driving: declaring the activity
+can trigger GM's distraction overlay even when the device is not the CPC200.
 
 The bridge service is an exported bound service. It is deliberately not a
 foreground service: the Play app binds to it while the Carlink session is
-active, avoiding foreground-service restrictions on GM AAOS. The fixed-handler
-activity only establishes the GM USB permission path and then exits.
+active, avoiding foreground-service restrictions on GM AAOS.
 
 The Play app declares package visibility for `android.car.usb.handler` so
 `PackageManager` can resolve the exported bridge service on Android 11+/AAOS.
@@ -62,7 +63,7 @@ Install both APKs for the same AAOS user/profile:
 1. Install the USB helper APK.
 2. Install or update the Play Carlink app.
 3. Unplug/replug the CPC200 adapter, or power-cycle the radio, so GM can run
-   its attach handler and apply the helper's USB permission.
+   its fixed handler and apply the helper's USB permission.
 4. Launch Carlink while parked.
 
 The generated APKs are:
